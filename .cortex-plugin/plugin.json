@@ -1,0 +1,5 @@
+{
+  "name": "saaspocalypse",
+  "description": "Build applications on Snowflake where AI agents and data pipelines are first-class citizens. Uses Hybrid Tables, Stored Procedures, Snowflake Tasks, DCM Projects for deployment, and Snowflake App Runtime (Next.js) for UI. No external services needed. Triggers: new app, add entity, hybrid table, stored procedure, validation, DCM, deploy, plan, framework, build app, UI design, reference data, semantic view, jobs, tasks, saaspocalypse, app runtime, Next.js.",
+  "version": "1.0.0"
+}
