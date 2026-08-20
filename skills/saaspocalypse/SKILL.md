@@ -37,7 +37,7 @@ Snowflake (all native — no external services)
 ├── Hybrid Tables              # App data (CRUD via stored procs)
 ├── Stored Procedures          # Validated writes
 ├── Jobs Table (Hybrid)        # Async work queue
-├── Snowflake Task             # Job runner (EXECUTE TASK)
+├── Snowflake Task             # Job runner (scheduled, polls for pending jobs)
 ├── Semantic View              # Analytics (Cortex Analyst)
 ├── Reference Tables           # Existing Snowflake tables (read-only)
 └── App Runtime (Next.js)      # UI with direct Snowflake SQL access
@@ -48,13 +48,13 @@ Snowflake (all native — no external services)
 ```
 apps/{name}/
 ├── manifest.yml              # DCM project manifest
-├── definitions/
-│   ├── tables.sql            # DEFINE HYBRID TABLE statements
-│   ├── procs.sql             # DEFINE PROCEDURE statements
-│   ├── jobs.sql              # Jobs table + sequences
-│   ├── tasks.sql             # DEFINE TASK for job runner
-│   ├── roles.sql             # DEFINE ROLE + GRANT statements
-│   └── semantic_view.sql     # Semantic view creation
+├── pre_deploy.sql            # Hybrid tables (CREATE HYBRID TABLE IF NOT EXISTS)
+├── post_deploy.sql           # Semantic view, other non-DCM objects
+├── sources/
+│   └── definitions/
+│       ├── procs.sql         # DEFINE PROCEDURE statements
+│       ├── tasks.sql         # DEFINE TASK for job runner
+│       └── roles.sql         # DEFINE ROLE + GRANT statements
 ├── skill/                    # App-specific CoCo skill (for agents)
 │   ├── .cortex-plugin/plugin.json
 │   ├── SKILL.md
@@ -165,19 +165,31 @@ export async function callProc(name: string, params: any[]) {
 
 ## DCM Deployment
 
-### Plan (preview changes)
+### 1. Create hybrid tables (first time, or when schema changes)
 
 ```bash
-snow dcm plan --project-path apps/{name}/
+snow sql -f apps/{name}/pre_deploy.sql -c <connection>
 ```
 
-### Deploy (apply)
+### 2. Plan (preview procedure/task/role changes)
 
 ```bash
-snow dcm deploy --project-path apps/{name}/
+snow dcm plan <DB.SCHEMA.PROJECT> -c <connection>
 ```
 
-### Deploy the UI
+### 3. Deploy (apply)
+
+```bash
+snow dcm deploy <DB.SCHEMA.PROJECT> -c <connection>
+```
+
+### 4. Post-deploy (semantic view, etc.)
+
+```bash
+snow sql -f apps/{name}/post_deploy.sql -c <connection>
+```
+
+### 5. Deploy the UI
 
 ```bash
 cd apps/{name}/app/
@@ -239,9 +251,9 @@ BEGIN
 
     -- Dispatch job
     INSERT INTO support.jobs (job_id, job_type, entity_name, record_id, payload)
-    VALUES (:v_job_id, 'triage_ticket', 'tickets', :v_ticket_id,
-            OBJECT_CONSTRUCT('title', :p_title, 'priority', :p_priority));
-    EXECUTE TASK support.job_runner USING CONFIG = CONCAT('{"job_id": "', :v_job_id, '"}');
+    SELECT :v_job_id, 'triage_ticket', 'tickets', :v_ticket_id,
+            OBJECT_CONSTRUCT('title', :p_title, 'priority', :p_priority);
+    EXECUTE TASK support.job_runner;;
 
     RETURN OBJECT_CONSTRUCT('success', TRUE, 'ticket_id', :v_ticket_id, 'short_id', :v_short_id);
 END;
@@ -253,10 +265,10 @@ $$;
 ```sql
 DEFINE TASK support.job_runner
     WAREHOUSE = 'SUPPORT_WH'
-    CONFIG = $${"handlers": {"triage_ticket": "support.handle_triage"}}$$
+    SCHEDULE = '60 MINUTE'
     STARTED
 AS
-    CALL support.process_job(SYSTEM$GET_TASK_GRAPH_CONFIG());
+    CALL support.process_pending_jobs();
 ```
 
 ## Error Response Format
@@ -352,3 +364,56 @@ FROM @my_db.my_schema.app_repo/branches/main/apps/support/;
 - After UI design interview, present decisions before coding
 - After `snow dcm plan`, show changeset and wait for approval
 - After writing UI, confirm before `snow app deploy`
+
+## DCM Gotchas
+
+These constraints apply when writing DEFINE statements and stored procedures:
+
+### Tables
+- **Hybrid Tables go in `pre_deploy.sql`** — DCM cannot create hybrid tables (no supported syntax). Define them as `CREATE HYBRID TABLE IF NOT EXISTS` in `pre_deploy.sql`, which runs before `snow dcm plan`/`deploy`. This means tables are NOT managed by DCM — schema changes require manual ALTER statements or recreating tables.
+- `PRIMARY KEY`, `UNIQUE`, and other constraints work in hybrid table DDL.
+- Use `CREATE HYBRID TABLE IF NOT EXISTS` for idempotent reruns.
+- Seed reference data with `MERGE INTO ... WHEN NOT MATCHED THEN INSERT`.
+- DEFINE TABLE (regular tables) in DCM supports `PRIMARY KEY` inline — use only if hybrid is not needed.
+
+### Stored Procedures
+- **No `OBJECT_CONSTRUCT()` in VALUES clauses** — Snowflake rejects it. Always use `INSERT INTO ... SELECT ...` form:
+  ```sql
+  -- WRONG:
+  INSERT INTO t (id, payload) VALUES (:v_id, OBJECT_CONSTRUCT('key', :val));
+  -- CORRECT:
+  INSERT INTO t (id, payload) SELECT :v_id, OBJECT_CONSTRUCT('key', :val);
+  ```
+- **`EXECUTE TASK` for immediate job dispatch** — After inserting a job, call `EXECUTE TASK` to trigger immediate processing. The scheduled task (1 hour default) is only a fallback for edge cases — normal operation relies on `EXECUTE TASK`:
+  ```sql
+  INSERT INTO schema.jobs (...) SELECT ...;
+  EXECUTE TASK schema.job_runner;
+  ```
+- **Multi-line IF with OR** — DCM analyze may reject multi-line OR conditions. Keep on one line:
+  ```sql
+  IF ((:a IS NOT NULL AND :a != :b) OR (:c IS NOT NULL AND :c != :d)) THEN
+  ```
+- **Use `PARSE_JSON('{}')` not `OBJECT_CONSTRUCT()`** for empty object defaults in INSERT...SELECT.
+
+### Tasks
+- The `STARTED` keyword enables the task immediately on deploy.
+- Task warehouse must exist or be defined in the same project.
+
+## Local UI Development
+
+For fast UI iteration, run the Next.js app locally instead of deploying to App Runtime:
+
+```bash
+cd apps/{name}/app
+SNOWFLAKE_DEFAULT_CONNECTION_NAME=myconn npm run dev
+```
+
+### Setup
+- Add `snowflake-sdk` and `smol-toml` to `package.json` dependencies
+- Create `.env.local` with `SNOWFLAKE_DEFAULT_CONNECTION_NAME=<connection>` to select from `~/.snowflake/config.toml`
+- The `lib/snowflake.ts` helper auto-detects auth: SPCS token → env vars → TOML config
+
+### Known Issues
+- Snowflake SDK returns **UPPERCASE column names** — use quoted aliases (`as "total"`) or handle both cases in code
+- Next.js 15+: `searchParams` and `params` are **Promises** — must `await` them in server components
+- Bind parameters (`?`) are not natively supported by the SDK in this mode — inline them via a helper that escapes strings and passes numbers raw

@@ -32,11 +32,9 @@ BEGIN
 
     -- Dispatch async job (optional)
     INSERT INTO {schema}.jobs (job_id, job_type, entity_name, record_id, payload)
-    VALUES (:v_job_id, 'on_create', '{entity}', :v_id,
-            OBJECT_CONSTRUCT('field1', :p_field1));
-
-    EXECUTE TASK {schema}.job_runner
-        USING CONFIG = CONCAT('{{"job_id": "', :v_job_id, '"}}');
+    SELECT :v_job_id, 'on_create', '{entity}', :v_id,
+            OBJECT_CONSTRUCT('field1', :p_field1);
+    EXECUTE TASK {schema}.job_runner;
 
     RETURN OBJECT_CONSTRUCT('success', TRUE, 'id', :v_id);
 END;
@@ -157,26 +155,26 @@ SELECT 'OMS-' || value::VARCHAR INTO :v_short_id
 ```sql
 -- Insert job record
 INSERT INTO {schema}.jobs (job_id, job_type, entity_name, record_id, payload)
-VALUES (:v_job_id, 'job_type_name', 'entity', :v_record_id,
-        OBJECT_CONSTRUCT('key', 'value'));
+SELECT :v_job_id, 'job_type_name', 'entity', :v_record_id,
+        OBJECT_CONSTRUCT('key', 'value');
 
--- Kick off the task
-EXECUTE TASK {schema}.job_runner
-    USING CONFIG = CONCAT('{{"job_id": "', :v_job_id, '"}}');
+-- Kick off the task immediately
+EXECUTE TASK {schema}.job_runner;
 ```
 
 ## Job Runner Task
 
+The task runs on a 1-hour schedule as a fallback safety net. Normal job processing
+happens immediately via `EXECUTE TASK` called from within stored procedures — the
+schedule should rarely fire under normal operation.
+
 ```sql
 DEFINE TASK {schema}.job_runner
     WAREHOUSE = '{warehouse}'
-    CONFIG = $${{"handlers": {{
-        "job_type_1": "{schema}.handle_type_1",
-        "job_type_2": "{schema}.handle_type_2"
-    }}}}$$
+    SCHEDULE = '60 MINUTE'
     STARTED
 AS
-    CALL {schema}.process_job(SYSTEM$GET_TASK_GRAPH_CONFIG());
+    CALL {schema}.process_pending_jobs();
 ```
 
 ## Job Processor
