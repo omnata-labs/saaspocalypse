@@ -417,3 +417,22 @@ SNOWFLAKE_DEFAULT_CONNECTION_NAME=myconn npm run dev
 - Snowflake SDK returns **UPPERCASE column names** — use quoted aliases (`as "total"`) or handle both cases in code
 - Next.js 15+: `searchParams` and `params` are **Promises** — must `await` them in server components
 - Bind parameters (`?`) are not natively supported by the SDK in this mode — inline them via a helper that escapes strings and passes numbers raw
+
+## .gitignore
+
+Every saaspocalypse project should include this `.gitignore`:
+
+```
+node_modules/
+.next/
+.env
+.env.local
+
+# DCM output artifacts
+out/
+
+# Cortex Code plans (local development artifacts)
+.snowflake/cortex/plans/
+```
+
+**Do commit** `package-lock.json` — it ensures reproducible installs.
